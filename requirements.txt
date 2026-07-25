@@ -1,0 +1,35 @@
+# Core
+streamlit>=1.38.0
+python-dotenv>=1.0.1
+
+# LangChain ecosystem (current APIs)
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-core>=0.3.0
+langchain-text-splitters>=0.3.0
+langchain-chroma>=0.1.4
+langchain-huggingface>=0.1.0
+
+# Embeddings (local, free, no API key)
+sentence-transformers>=3.0.0
+torch>=2.3.0  # CPU-friendly; install with --index-url if needed
+
+# Vector store
+chromadb>=0.5.0
+
+# Document loaders
+pypdf>=4.3.0
+pandas>=2.2.0
+openpyxl>=3.1.0  # for some CSV edge cases
+
+# LLM via OpenRouter
+openai>=1.40.0  # used as OpenAI-compatible client for OpenRouter
+
+# PDF report generation
+reportlab>=4.2.0
+Pillow>=10.4.0
+
+# Utilities
+tiktoken>=0.7.0
+numpy>=1.26.0
+tqdm>=4.66.0
