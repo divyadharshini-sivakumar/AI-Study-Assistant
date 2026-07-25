@@ -1,0 +1,18 @@
+Biology Study Notes – Cell Biology
+
+1. Mitochondria
+Mitochondria are membrane-bound organelles found in the cytoplasm of eukaryotic cells. They are often called the "powerhouse of the cell" because their primary function is to produce adenosine triphosphate (ATP) through cellular respiration. The inner membrane forms folds called cristae, which increase surface area for the electron transport chain.
+
+2. Photosynthesis
+Photosynthesis is the process by which green plants, algae and some bacteria convert light energy into chemical energy. The overall equation is:
+6CO₂ + 6H₂O + light energy → C₆H₁₂O₆ + 6O₂
+Chlorophyll, located in chloroplasts, captures light energy. The process has two main stages: the light-dependent reactions and the Calvin cycle (light-independent reactions).
+
+3. Nucleus
+The nucleus is the control centre of the cell. It contains the cell’s genetic material (DNA) organised into chromosomes. The nuclear envelope is a double membrane with nuclear pores that regulate transport of molecules between the nucleus and cytoplasm.
+
+4. Ribosomes
+Ribosomes are the sites of protein synthesis. They can be free in the cytoplasm or attached to the rough endoplasmic reticulum. Ribosomes read messenger RNA (mRNA) and assemble amino acids into polypeptide chains.
+
+5. Cell Membrane
+The cell membrane (plasma membrane) is a selectively permeable phospholipid bilayer that controls the movement of substances into and out of the cell. It also contains proteins that act as receptors, channels and transporters.
