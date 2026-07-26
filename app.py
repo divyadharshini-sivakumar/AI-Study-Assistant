@@ -177,6 +177,38 @@ def get_chromadb_backend_data(limit: int = 5) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Helper: Display retrieved sources as clickable expandable cards
+# ---------------------------------------------------------------------------
+
+def display_retrieved_sources(
+    chunks: List[Dict[str, Any]],
+    key_prefix: str,
+) -> None:
+    """
+    Display retrieved sources as simple clickable expanders.
+
+    Clicking a source shows only the retrieved document content.
+    """
+    if not chunks:
+        return
+
+    st.markdown("#### 📚 Retrieved sources")
+
+    for index, chunk in enumerate(chunks, start=1):
+        citation = chunk.get("citation", "Unknown source")
+        page_content = chunk.get("page_content", "")
+
+        with st.expander(
+            f"Source {index}: {citation}",
+            expanded=False,
+        ):
+            if page_content:
+                st.markdown(page_content)
+            else:
+                st.info("No text is available for this source.")
+
+
+# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
@@ -689,11 +721,16 @@ if st.session_state.study_tool_output:
 # Display previous chat messages
 # ---------------------------------------------------------------------------
 
-for message in st.session_state.messages:
+for message_index, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-        if message.get("sources"):
+        if message.get("chunks"):
+            display_retrieved_sources(
+                message["chunks"],
+                key_prefix=f"history_{message_index}",
+            )
+        elif message.get("sources"):
             with st.expander("Sources"):
                 for source in message["sources"]:
                     st.markdown(f"- {source}")
@@ -736,49 +773,10 @@ if prompt := st.chat_input(
                 )
 
                 if sources:
-                    with st.expander(
-                        "Retrieved sources & relevance"
-                    ):
-                        for chunk in result.get(
-                            "chunks",
-                            [],
-                        ):
-                            score = chunk.get(
-                                "score",
-                                0,
-                            )
-
-                            citation = chunk.get(
-                                "citation",
-                                "Unknown source",
-                            )
-
-                            relevance_label = (
-                                "✅ relevant"
-                                if chunk.get("is_relevant")
-                                else "⚠️ low relevance"
-                            )
-
-                            st.markdown(
-                                f"- {citation}  \n"
-                                f"  Relevance score "
-                                f"(distance): "
-                                f"`{score:.4f}` · "
-                                f"{relevance_label}"
-                            )
-
-                            page_content = chunk.get(
-                                "page_content",
-                                "",
-                            )
-
-                            if page_content:
-                                preview = (
-                                    page_content[:250]
-                                    + "..."
-                                )
-
-                                st.caption(preview)
+                    display_retrieved_sources(
+                        result.get("chunks", []),
+                        key_prefix=f"current_{len(st.session_state.messages)}",
+                    )
 
                 with st.expander(
                     "Agent trace (ReAct stages)"
@@ -820,6 +818,7 @@ if prompt := st.chat_input(
             "role": "assistant",
             "content": answer,
             "sources": sources,
+            "chunks": result.get("chunks", []) if "result" in locals() else [],
         }
     )
 
