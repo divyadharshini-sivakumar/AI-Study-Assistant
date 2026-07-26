@@ -1,270 +1,232 @@
 """
 agent.py
+--------
+Controlled ReAct-style agent for the AI Study Assistant.
 
-ReAct-style AI agent for the AI Study Assistant.
-
-Workflow:
-1. Decide whether document retrieval is required.
-2. Retrieve relevant chunks from ChromaDB.
-3. Validate the retrieved context.
-4. Generate an answer using only the retrieved study materials.
+Stages:
+  1. Decide → RETRIEVE or DIRECT
+  2. Retrieve evidence (if needed)
+  3. Validate relevance → SUFFICIENT / INSUFFICIENT
+  4. Produce grounded answer or the exact fallback sentence
 """
 
-from typing import Any, Dict, List
+from __future__ import annotations
 
-from rag import retrieve
-from utils import get_llm
+import logging
+from typing import Any, Dict, List, Optional
 
-
-FALLBACK_MESSAGE = (
-    "The uploaded study materials do not contain enough information."
+from utils import get_openrouter_client, get_model_name, get_llm_params
+from rag import retrieve_relevant_only, has_sufficient_evidence
+from prompts import (
+    SYSTEM_ROLE,
+    QA_PROMPT,
+    AGENT_DECIDE_RETRIEVAL,
+    AGENT_VALIDATE_RELEVANCE,
+    AGENT_FINAL_ANSWER,
+    SUMMARY_PROMPT,
+    FLASHCARD_PROMPT,
+    FLASHCARD_FEW_SHOT,
+    MCQ_PROMPT,
+    MCQ_FEW_SHOT,
+    INTERVIEW_PROMPT,
+    build_context,
 )
 
+logger = logging.getLogger(__name__)
 
-def _extract_chunk_text(chunk: Dict[str, Any]) -> str:
+
+# ---------------------------------------------------------------------------
+# Low-level LLM call
+# ---------------------------------------------------------------------------
+
+def _call_llm(
+    messages: List[Dict[str, str]],
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
     """
-    Extract document text from a retrieved chunk.
-
-    This supports different possible keys returned by rag.py.
+    Single OpenRouter call with free-tier friendly defaults.
+    Returns the assistant content or an empty string on failure.
     """
-    return str(
-        chunk.get("document")
-        or chunk.get("content")
-        or chunk.get("text")
-        or chunk.get("page_content")
-        or ""
-    ).strip()
+    client = get_openrouter_client()
+    model = get_model_name()
+    params = get_llm_params()
 
+    if temperature is not None:
+        params["temperature"] = temperature
+    if max_tokens is not None:
+        params["max_tokens"] = max_tokens
 
-def _format_context(retrieved_chunks: List[Dict[str, Any]]) -> str:
-    """
-    Combine retrieved ChromaDB chunks into one context block.
-    """
-    context_parts: List[str] = []
-
-    for index, chunk in enumerate(retrieved_chunks, start=1):
-        text = _extract_chunk_text(chunk)
-
-        if not text:
-            continue
-
-        metadata = chunk.get("metadata") or {}
-
-        source = (
-            metadata.get("source")
-            or metadata.get("filename")
-            or metadata.get("file_name")
-            or chunk.get("source")
-            or "Uploaded study material"
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **params,
         )
-
-        page = (
-            metadata.get("page")
-            if metadata.get("page") is not None
-            else chunk.get("page", "N/A")
-        )
-
-        context_parts.append(
-            f"""
-SOURCE {index}
-File: {source}
-Page: {page}
-
-{text}
-""".strip()
-        )
-
-    return "\n\n---\n\n".join(context_parts)
+        content = response.choices[0].message.content
+        return (content or "").strip()
+    except Exception as e:
+        logger.error("OpenRouter call failed: %s", e)
+        return ""
 
 
-def _invoke_llm(prompt: str) -> str:
+# ---------------------------------------------------------------------------
+# Stage 1 – Decide whether retrieval is required
+# ---------------------------------------------------------------------------
+
+def decide_retrieval(query: str) -> str:
     """
-    Invoke the configured OpenRouter LLM and return plain text.
+    Returns 'RETRIEVE' or 'DIRECT'.
+    Falls back to RETRIEVE on any ambiguity (safer for a study assistant).
     """
-    llm = get_llm()
-    response = llm.invoke(prompt)
-
-    if hasattr(response, "content"):
-        return str(response.content).strip()
-
-    return str(response).strip()
-
-
-def decide_action(question: str) -> str:
-    """
-    Decide whether the question requires retrieval.
-
-    Since this application answers questions from uploaded documents,
-    most meaningful study questions should use retrieval.
-    """
-    if not question or not question.strip():
-        return "NO_QUESTION"
-
+    prompt = AGENT_DECIDE_RETRIEVAL.format(query=query)
+    messages = [
+        {"role": "system", "content": "You are a routing agent. Reply with one word only."},
+        {"role": "user", "content": prompt},
+    ]
+    decision = _call_llm(messages, temperature=0.0, max_tokens=16).upper()
+    if "DIRECT" in decision:
+        return "DIRECT"
     return "RETRIEVE"
 
 
-def generate_answer(question: str, context: str) -> str:
+# ---------------------------------------------------------------------------
+# Stage 3 – Validate relevance of retrieved chunks
+# ---------------------------------------------------------------------------
+
+def validate_relevance(question: str, chunks: List[Dict[str, Any]]) -> str:
     """
-    Generate the final answer strictly from retrieved context.
+    Returns 'SUFFICIENT' or 'INSUFFICIENT'.
     """
-    prompt = f"""
-You are an AI Study Assistant.
+    if not chunks:
+        return "INSUFFICIENT"
 
-Answer the user's question using only the uploaded study-material context
-provided below.
-
-Important rules:
-
-1. Use only information found in the provided context.
-2. Do not use outside knowledge.
-3. Do not invent facts.
-4. Give a clear and complete answer.
-5. When the context directly or indirectly contains the answer, answer it.
-6. Do not return the fallback message merely because the wording in the
-   question is different from the wording in the context.
-7. The context may contain the answer across multiple retrieved chunks.
-8. Combine relevant information from the chunks when necessary.
-9. Only return the exact sentence below when the context genuinely contains
-   no information that can answer the question:
-
-"{FALLBACK_MESSAGE}"
-
-Uploaded study-material context:
-
-{context}
-
-User question:
-
-{question}
-
-Answer:
-"""
-
-    answer = _invoke_llm(prompt)
-
-    if not answer:
-        return FALLBACK_MESSAGE
-
-    return answer
-
-
-def run_agent(question: str) -> Dict[str, Any]:
-    """
-    Run the complete ReAct-style document question-answering workflow.
-
-    Returns:
-        {
-            "answer": str,
-            "sources": list,
-            "trace": {
-                "decision": str,
-                "validation": str,
-                "chunks_retrieved": int
-            }
-        }
-    """
-    cleaned_question = question.strip() if question else ""
-
-    trace: Dict[str, Any] = {
-        "decision": "NO_QUESTION",
-        "validation": "INSUFFICIENT",
-        "chunks_retrieved": 0,
-    }
-
-    if not cleaned_question:
-        return {
-            "answer": "Please enter a question.",
-            "sources": [],
-            "trace": trace,
-        }
-
-    # Step 1: Decide
-    decision = decide_action(cleaned_question)
-    trace["decision"] = decision
-
-    if decision != "RETRIEVE":
-        return {
-            "answer": FALLBACK_MESSAGE,
-            "sources": [],
-            "trace": trace,
-        }
-
-    # Step 2: Retrieve from ChromaDB
-    try:
-        retrieved_chunks = retrieve(cleaned_question)
-    except Exception as error:
-        return {
-            "answer": (
-                "An error occurred while retrieving the uploaded study "
-                f"materials: {error}"
-            ),
-            "sources": [],
-            "trace": trace,
-        }
-
-    if retrieved_chunks is None:
-        retrieved_chunks = []
-
-    trace["chunks_retrieved"] = len(retrieved_chunks)
-
-    # Step 3: Validate deterministically
-    #
-    # Do not ask the LLM to reject retrieved chunks again.
-    # If ChromaDB returned usable text, treat the context as sufficient.
-    usable_chunks = [
-        chunk
-        for chunk in retrieved_chunks
-        if isinstance(chunk, dict) and _extract_chunk_text(chunk)
+    # Build a compact representation for the validator
+    chunk_text = "\n\n".join(
+        f"[{c['citation']}]\n{c['page_content'][:400]}" for c in chunks
+    )
+    prompt = AGENT_VALIDATE_RELEVANCE.format(question=question, chunks=chunk_text)
+    messages = [
+        {"role": "system", "content": "You are a relevance validator. Reply with one word only."},
+        {"role": "user", "content": prompt},
     ]
+    decision = _call_llm(messages, temperature=0.0, max_tokens=16).upper()
+    if "SUFFICIENT" in decision:
+        return "SUFFICIENT"
+    return "INSUFFICIENT"
 
-    if not usable_chunks:
-        trace["validation"] = "INSUFFICIENT"
 
-        return {
-            "answer": FALLBACK_MESSAGE,
-            "sources": retrieved_chunks,
-            "trace": trace,
-        }
+# ---------------------------------------------------------------------------
+# Stage 4 – Final grounded answer
+# ---------------------------------------------------------------------------
 
-    trace["validation"] = "SUFFICIENT"
+def generate_grounded_answer(question: str, chunks: List[Dict[str, Any]]) -> str:
+    """Produce the final student-facing answer."""
+    context = build_context(chunks)
+    prompt = QA_PROMPT.format(context=context, question=question)
+    messages = [
+        {"role": "system", "content": SYSTEM_ROLE},
+        {"role": "user", "content": prompt},
+    ]
+    return _call_llm(messages)
 
-    # Step 4: Build context
-    context = _format_context(usable_chunks)
 
-    if not context.strip():
-        trace["validation"] = "INSUFFICIENT"
+# ---------------------------------------------------------------------------
+# Main agent entry point (ReAct-style workflow)
+# ---------------------------------------------------------------------------
 
-        return {
-            "answer": FALLBACK_MESSAGE,
-            "sources": retrieved_chunks,
-            "trace": trace,
-        }
-
-    # Step 5: Generate final answer
-    try:
-        answer = generate_answer(cleaned_question, context)
-    except Exception as error:
-        answer = (
-            "An error occurred while generating the answer: "
-            f"{error}"
-        )
-
-    return {
-        "answer": answer,
-        "sources": retrieved_chunks,
-        "trace": trace,
+def run_agent(query: str) -> Dict[str, Any]:
+    """
+    Full controlled ReAct-style loop.
+    Returns a structured result dictionary for the UI.
+    """
+    result: Dict[str, Any] = {
+        "query": query,
+        "decision": None,
+        "chunks": [],
+        "validation": None,
+        "answer": "",
+        "sources": [],
     }
 
+    # --- Stage 1: Decide ---
+    decision = decide_retrieval(query)
+    result["decision"] = decision
 
-def answer_question(question: str) -> Dict[str, Any]:
-    """
-    Compatibility function in case app.py imports answer_question().
-    """
-    return run_agent(question)
+    if decision == "DIRECT":
+        # Simple direct reply for greetings / meta questions
+        messages = [
+            {"role": "system", "content": SYSTEM_ROLE},
+            {"role": "user", "content": query},
+        ]
+        result["answer"] = _call_llm(messages, max_tokens=256)
+        return result
+
+    # --- Stage 2: Retrieve ---
+    chunks = retrieve_relevant_only(query)
+    result["chunks"] = chunks
+    result["sources"] = [c["citation"] for c in chunks]
+
+    # --- Stage 3: Validate ---
+    validation = validate_relevance(query, chunks)
+    result["validation"] = validation
+
+    if validation == "INSUFFICIENT":
+        result["answer"] = "The uploaded study materials do not contain enough information."
+        return result
+
+    # --- Stage 4: Answer ---
+    answer = generate_grounded_answer(query, chunks)
+    # Final safety net
+    if not answer or "do not contain enough information" in answer.lower():
+        result["answer"] = "The uploaded study materials do not contain enough information."
+    else:
+        result["answer"] = answer
+
+    return result
 
 
-def ask_agent(question: str) -> Dict[str, Any]:
-    """
-    Compatibility function in case app.py imports ask_agent().
-    """
-    return run_agent(question)
+# ---------------------------------------------------------------------------
+# Specialised generation helpers (used by the UI)
+# ---------------------------------------------------------------------------
+
+def generate_summary(chunks: List[Dict[str, Any]]) -> str:
+    context = build_context(chunks, max_chars=4000)
+    prompt = SUMMARY_PROMPT.format(context=context)
+    messages = [
+        {"role": "system", "content": SYSTEM_ROLE},
+        {"role": "user", "content": prompt},
+    ]
+    return _call_llm(messages, max_tokens=800)
+
+
+def generate_flashcards(chunks: List[Dict[str, Any]], n: int = 5) -> str:
+    context = build_context(chunks, max_chars=3500)
+    prompt = FLASHCARD_PROMPT.format(
+        n=n, few_shot=FLASHCARD_FEW_SHOT, context=context
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_ROLE},
+        {"role": "user", "content": prompt},
+    ]
+    return _call_llm(messages, max_tokens=900)
+
+
+def generate_mcqs(chunks: List[Dict[str, Any]], n: int = 5) -> str:
+    context = build_context(chunks, max_chars=3500)
+    prompt = MCQ_PROMPT.format(n=n, few_shot=MCQ_FEW_SHOT, context=context)
+    messages = [
+        {"role": "system", "content": SYSTEM_ROLE},
+        {"role": "user", "content": prompt},
+    ]
+    return _call_llm(messages, max_tokens=1100)
+
+
+def generate_interview_questions(chunks: List[Dict[str, Any]], n: int = 5) -> str:
+    context = build_context(chunks, max_chars=3500)
+    prompt = INTERVIEW_PROMPT.format(n=n, context=context)
+    messages = [
+        {"role": "system", "content": SYSTEM_ROLE},
+        {"role": "user", "content": prompt},
+    ]
+    return _call_llm(messages, max_tokens=700)
